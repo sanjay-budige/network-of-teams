@@ -62,7 +62,7 @@ export default function NetworkOfTeams() {
     selectedLabels: [],
     changesSince: "",
     includeDeactivated: false,
-    level: { team: true, organization: true },
+    // level: { team: true, organization: true },
     timeFrame: "Active cycle (Q2 2026)",
     showMeasures: true,
     highlightMyTeam: false,
@@ -555,6 +555,7 @@ export default function NetworkOfTeams() {
         t.label.length > (t.parentId ? 26 : 22)
           ? `${t.label.slice(0, t.parentId ? 24 : 20)}…`
           : t.label;
+          
       g.append("text")
         .attr("class", "lod-medium")
         .attr("text-anchor", "middle")
@@ -1027,7 +1028,7 @@ export default function NetworkOfTeams() {
                   )}
                 </div>
 
-                <div style={{ marginBottom: 4 }}>
+                {/* <div style={{ marginBottom: 4 }}>
                   <div style={{ fontSize: 9, color: PANEL.textMuted, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 8 }}>Level</div>
                   {[{ key: "team", label: "Team" }, { key: "organization", label: "Organization" }].map(l => (
                     <label key={l.key} style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: 6, userSelect: "none" }}>
@@ -1037,7 +1038,7 @@ export default function NetworkOfTeams() {
                       <span style={{ fontSize: 11, color: PANEL.text }}>{l.label}</span>
                     </label>
                   ))}
-                </div>
+                </div> */}
               </div>
             )}
           </div>

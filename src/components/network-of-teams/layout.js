@@ -35,7 +35,7 @@ export function layoutTeamNodes(teamNodes, cx, cy, minDim, expandedOrgId) {
   const R2 = minDim * 0.84;
   const hubR = Math.max(68, minDim * 0.086);
   const divR = 32;
-  const leafR = 22;
+  const leafR = 22;  
   const positions = { [ORG_ROOT_ID]: { x: cx, y: cy, r: hubR } };
 
   const inSet = new Set(teamNodes.map((t) => t.id));

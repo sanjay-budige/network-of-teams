@@ -109,16 +109,16 @@ export function filterOutcomesForExplorer(outcomes, links, filters, { skipConfid
       o = o.filter((x) => connectedIds.has(x.id));
     }
   }
-  if (!filters.level.team) {
-    o = o.filter(
-      (x) =>
-        !rawLinks.some(
-          (l) =>
-            (l.source === x.id || l.target === x.id) &&
-            rawNodes.find((nn) => nn.id === (l.source === x.id ? l.target : l.source))?.type === "team",
-        ),
-    );
-  }
+  // if (!filters.level.team) {
+  //   o = o.filter(
+  //     (x) =>
+  //       !rawLinks.some(
+  //         (l) =>
+  //           (l.source === x.id || l.target === x.id) &&
+  //           rawNodes.find((nn) => nn.id === (l.source === x.id ? l.target : l.source))?.type === "team",
+  //       ),
+  //   );
+  // }
   return o;
 }
 

@@ -1,7 +1,16 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import * as d3 from "d3";
 
-import { COLORS, GRAPH, PANEL, ORG_ROOT_ID, ORG_LABEL } from "./constants.js";
+import {
+  COLORS,
+  GRAPH,
+  PANEL,
+  ORG_ROOT_ID,
+  ORG_LABEL,
+  SHOW_LAST_UPDATED_DATE_FILTER,
+  TEAM_DIM_ORG,
+  TEAM_DIM_LEAF,
+} from "./constants.js";
 import {
   rawNodes,
   rawLinks,
@@ -25,6 +34,7 @@ import {
   teamClosureForOutcomeIds,
   getOwnedOutcomeIdsForTeam,
   collectDescendantTeamIds,
+  collectTeamFocusHighlightIds,
 } from "./filterModel.js";
 import {
   layoutTeamNodes,
@@ -53,6 +63,8 @@ export default function NetworkOfTeams() {
   const chartContainerRef = useRef(null);
   const [chartSize, setChartSize] = useState({ w: 0, h: 0 });
   const [selectedNode, setSelectedNode] = useState(null);
+  /** Right panel drill history (only panel in-panel navigation pushes here; graph picks reset). */
+  const [detailPanelStack, setDetailPanelStack] = useState([]);
   const [filters, setFilters] = useState({
     keyword: "",
     confidence: { "on-track": true, challenge: true, "off-track": true, draft: true },
@@ -78,19 +90,49 @@ export default function NetworkOfTeams() {
   /** User drag nudges (px) for graph nodes — bubble-like repositioning. */
   const [nodeDragOffsets, setNodeDragOffsets] = useState({});
   const [zoomPct, setZoomPct] = useState(100);
+
+  const selectNodeFromGraph = useCallback((node) => {
+    setDetailPanelStack([]);
+    setSelectedNode(node);
+  }, []);
+
+  const closeDetailPanel = useCallback(() => {
+    setDetailPanelStack([]);
+    setSelectedNode(null);
+  }, []);
+
+  const drillDetailPanel = useCallback((node) => {
+    if (!node) return;
+    setDetailPanelStack((s) => (selectedNode && selectedNode.id !== node.id ? [...s, selectedNode] : s));
+    setSelectedNode(node);
+  }, [selectedNode]);
+
+  const detailPanelGoBack = useCallback(() => {
+    setDetailPanelStack((s) => {
+      if (s.length === 0) {
+        setSelectedNode(null);
+        return s;
+      }
+      const prev = s[s.length - 1];
+      setSelectedNode(prev);
+      return s.slice(0, -1);
+    });
+  }, []);
   const [leftSidebarOpen, setLeftSidebarOpen] = useState(true);
-  /** Legend is secondary UI — start collapsed so primary filters stay visible. */
-  const [legendExpanded, setLegendExpanded] = useState(false);
+  /** Map legend — open by default so first-time visitors see node/line meaning immediately. */
+  const [legendExpanded, setLegendExpanded] = useState(true);
   const zoomBehaviorRef = useRef(null);
   const zoomTransformRef = useRef(d3.zoomIdentity);
 
   const getFilteredData = useCallback(() => {
     let links = [...rawLinks];
 
+    const graphFilters = SHOW_LAST_UPDATED_DATE_FILTER ? filters : { ...filters, changesSince: "" };
+
     let outcomes = filterOutcomesForExplorer(
       rawNodes.filter((n) => n.type === "outcome"),
       links,
-      filters,
+      graphFilters,
       { skipConfidenceFilter: false },
     );
 
@@ -106,8 +148,8 @@ export default function NetworkOfTeams() {
           n.type === "measure" &&
           links.some((l) => l.type === "measures" && l.target === n.id && outcomeIdSet.has(l.source)),
       );
-      if (filters.changesSince) {
-        const cutoff = filters.changesSince;
+      if (graphFilters.changesSince) {
+        const cutoff = graphFilters.changesSince;
         measures = measures.filter((m) => m.updatedAt && m.updatedAt >= cutoff);
       }
       if (filters.keyword?.trim()) {
@@ -121,7 +163,15 @@ export default function NetworkOfTeams() {
       }
     }
 
-    const strategic = rawNodes.filter((n) => n.type === "strategic");
+    const strategicIdsLinkedToVisibleOutcomes = new Set();
+    for (const o of outcomes) {
+      for (const l of links) {
+        if (l.type === "strategic" && l.target === o.id) strategicIdsLinkedToVisibleOutcomes.add(l.source);
+      }
+    }
+    const strategic = rawNodes.filter(
+      (n) => n.type === "strategic" && strategicIdsLinkedToVisibleOutcomes.has(n.id),
+    );
 
     const byId = new Map();
     for (const n of teams) byId.set(n.id, n);
@@ -139,25 +189,51 @@ export default function NetworkOfTeams() {
   useEffect(() => {
     const { nodes } = getFilteredData();
     const teamIds = new Set(nodes.filter((n) => n.type === "team").map((n) => n.id));
-    if (expandedOrgId && !teamIds.has(expandedOrgId)) setExpandedOrgId(null);
-    if (expandedTeamId && !teamIds.has(expandedTeamId)) setExpandedTeamId(null);
+    queueMicrotask(() => {
+      if (expandedOrgId && !teamIds.has(expandedOrgId)) setExpandedOrgId(null);
+      if (expandedTeamId && !teamIds.has(expandedTeamId)) setExpandedTeamId(null);
+    });
   }, [getFilteredData, expandedOrgId, expandedTeamId]);
 
+  /** Sub-teams only receive positions when their division is expanded; auto-expand when sidebar team filter targets a team under that division so the selected team appears without an extra + click. */
   useEffect(() => {
-    setNodeDragOffsets({});
+    const label =
+      (filters.team && String(filters.team).trim()) ||
+      (filters.individual && INDIVIDUAL_TO_TEAM[filters.individual]) ||
+      "";
+    if (!label) return;
+
+    const teamNode = rawNodes.find((n) => n.type === "team" && n.label === label);
+    if (!teamNode) return;
+
+    let root = teamNode;
+    while (root.parentId) {
+      const parent = rawNodes.find((n) => n.id === root.parentId && n.type === "team");
+      if (!parent) break;
+      root = parent;
+    }
+    if (!divisionHasSubTeams(root.id)) return;
+
+    queueMicrotask(() => {
+      setExpandedOrgId((cur) => (cur === root.id ? cur : root.id));
+    });
+  }, [filters.team, filters.individual]);
+
+  useEffect(() => {
+    queueMicrotask(() => setNodeDragOffsets({}));
   }, [expandedOrgId, expandedTeamId]);
 
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === "Escape") {
-        setSelectedNode(null);
+        closeDetailPanel();
         setExpandedTeamId(null);
         setExpandedMeasures({});
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [closeDetailPanel]);
 
   useEffect(() => {
     const el = chartContainerRef.current;
@@ -205,6 +281,27 @@ export default function NetworkOfTeams() {
     const allOutcomes = filteredNodes.filter((n) => n.type === "outcome");
     const measurePool = filteredNodes.filter((n) => n.type === "measure");
 
+    /** Left panel “Highlight my team” follows the graph-selected team (`expandedTeamId`). */
+    const graphTeamHighlightLayer = filters.highlightMyTeam && expandedTeamId != null;
+    /** Ancestors + descendants — used only to dim teams outside the focus chain. */
+    const focusHighlightIds =
+      expandedTeamId != null ? collectTeamFocusHighlightIds(expandedTeamId) : null;
+    /** Selected team + its descendants only — accent / dashed highlight (not sibling org teams). */
+    const highlightSubtreeIds =
+      expandedTeamId != null ? collectDescendantTeamIds(expandedTeamId) : null;
+
+    const topDivisionIdForTeamNode = (tn) => {
+      if (!tn.parentId) return divisionHasSubTeams(tn.id) ? tn.id : null;
+      let node = tn;
+      while (node.parentId) {
+        const p = TEAM_NODE_BY_ID.get(node.parentId);
+        if (!p) return null;
+        if (!p.parentId) return p.id;
+        node = p;
+      }
+      return null;
+    };
+
     const visibleOutcomeIds =
       expandedTeamId != null ? getOwnedOutcomeIdsForTeam(expandedTeamId, allLinks) : new Set();
     const outcomes = allOutcomes.filter((o) => visibleOutcomeIds.has(o.id));
@@ -225,9 +322,17 @@ export default function NetworkOfTeams() {
         outcomeR,
         nodeById: TEAM_NODE_BY_ID,
         focusTeamId: expandedTeamId,
+        expandedOrgId,
         minDim,
       });
     }
+
+    const hideOutcomeDetailTitles =
+      expandedOrgId &&
+      expandedTeamId === expandedOrgId &&
+      [...TEAM_NODE_BY_ID.values()].some(
+        (n) => n.type === "team" && n.parentId === expandedOrgId && positions[n.id],
+      );
 
     if (filters.showMeasures && outcomes.length) {
       outcomes.forEach((o) => {
@@ -268,9 +373,10 @@ export default function NetworkOfTeams() {
           key: `hub-${root.id}`,
           marker: false,
           dashed: true,
-          stroke: "#cbd5e1",
-          sw: 1.1,
-          opacity: 0.85,
+          stroke: GRAPH.hierarchyLink,
+          strokeDasharray: GRAPH.hierarchyDash,
+          sw: 1.15,
+          opacity: 0.88,
         });
       }
     });
@@ -284,10 +390,11 @@ export default function NetworkOfTeams() {
           linkLines.push({
             key: `nested-${l.source}-${l.target}`,
             marker: false,
-            dashed: false,
-            stroke: COLORS.organization,
-            sw: 1.5,
-            opacity: 0.88,
+            dashed: true,
+            stroke: GRAPH.hierarchyLink,
+            strokeDasharray: GRAPH.hierarchyDash,
+            sw: 1.25,
+            opacity: 0.9,
             curvePath: curvedChordPath(a.x, a.y, a.r, b.x, b.y, b.r, cx, cy, minDim, 1),
           });
         }
@@ -306,9 +413,10 @@ export default function NetworkOfTeams() {
               key: `owns-${o.id}`,
               marker: false,
               dashed: true,
-              stroke: COLORS.outcome,
-              sw: 1.15,
-              opacity: 0.78,
+              strokeDasharray: graphTeamHighlightLayer ? GRAPH.highlightDash : undefined,
+              stroke: graphTeamHighlightLayer ? COLORS.accent : GRAPH.workLink,
+              sw: graphTeamHighlightLayer ? 1.55 : 1.2,
+              opacity: graphTeamHighlightLayer ? 0.95 : 0.82,
               curvePath: curvedChordPath(
                 pO.x,
                 pO.y,
@@ -337,11 +445,11 @@ export default function NetworkOfTeams() {
             linkLines.push({
               ...segM,
               key: `to-outcome-${m.id}`,
-              marker: true,
+              marker: false,
               dashed: true,
-              stroke: GRAPH.link,
-              sw: 1.2,
-              opacity: 1,
+              stroke: GRAPH.workLink,
+              sw: 1.15,
+              opacity: 0.88,
             });
           });
         }
@@ -412,19 +520,20 @@ export default function NetworkOfTeams() {
       .attr("orient", "auto")
       .append("path")
       .attr("d", "M0,-5L10,0L0,5")
-      .attr("fill", GRAPH.link);
+      .attr("fill", GRAPH.workLink);
 
     const gridG = gRoot.append("g").attr("pointer-events", "none");
     const maxGridR = minDim * 0.88;
-    for (let i = 1; i <= 6; i++) {
+    const gridRings = 5;
+    for (let i = 1; i <= gridRings; i++) {
       gridG
         .append("circle")
         .attr("cx", cx)
         .attr("cy", cy)
-        .attr("r", (maxGridR / 6) * i)
+        .attr("r", (maxGridR / gridRings) * i)
         .attr("fill", "none")
         .attr("stroke", GRAPH.grid)
-        .attr("stroke-opacity", 0.4)
+        .attr("stroke-opacity", 0.26)
         .attr("stroke-width", 1);
     }
 
@@ -444,7 +553,11 @@ export default function NetworkOfTeams() {
       .attr("stroke", (d) => d.stroke || GRAPH.link)
       .attr("stroke-width", (d) => d.sw ?? 1.25)
       .attr("stroke-opacity", (d) => d.opacity ?? 1)
-      .attr("stroke-dasharray", (d) => (d.dashed ? GRAPH.linkDash : "none"))
+      .attr("stroke-dasharray", (d) => {
+        if (d.strokeDasharray != null && d.strokeDasharray !== "") return d.strokeDasharray;
+        if (!d.dashed) return "none";
+        return d.stroke === GRAPH.hierarchyLink ? GRAPH.hierarchyDash : GRAPH.linkDash;
+      })
       .attr("stroke-linecap", "round")
       .attr("stroke-linejoin", "round")
       .attr("marker-end", (d) => (d.marker ? "url(#arrowRadial)" : null));
@@ -461,7 +574,11 @@ export default function NetworkOfTeams() {
       .attr("stroke", (d) => d.stroke || GRAPH.link)
       .attr("stroke-width", (d) => d.sw ?? 1.25)
       .attr("stroke-opacity", (d) => d.opacity ?? 1)
-      .attr("stroke-dasharray", (d) => (d.dashed ? GRAPH.linkDash : "none"))
+      .attr("stroke-dasharray", (d) => {
+        if (d.strokeDasharray != null && d.strokeDasharray !== "") return d.strokeDasharray;
+        if (!d.dashed) return "none";
+        return d.stroke === GRAPH.hierarchyLink ? GRAPH.hierarchyDash : GRAPH.linkDash;
+      })
       .attr("marker-end", (d) => (d.marker ? "url(#arrowRadial)" : null));
 
     const hubG = main.append("g").attr("transform", `translate(${cx},${cy})`);
@@ -496,11 +613,35 @@ export default function NetworkOfTeams() {
         .style("cursor", "grab")
         .call(bindBubbleDrag(t.id));
       const r = t.parentId ? leafR : divR;
-      const col = getNodeColor(t, { highlightMyTeam: filters.highlightMyTeam });
+      const col = getNodeColor(t);
       const isSel = selectedNode?.id === t.id;
       const isOutcomeFocus = expandedTeamId === t.id;
-      const stroke = isOutcomeFocus ? COLORS.accent : isSel ? "#0f172a" : hexStroke(col);
-      const fill = teamShapeFill(col);
+      const inFocusChain = !!(focusHighlightIds && focusHighlightIds.has(t.id));
+      const dimOutsideSubtree = expandedTeamId != null && focusHighlightIds && !inFocusChain;
+      const inHighlightSubtree = !!(highlightSubtreeIds && highlightSubtreeIds.has(t.id));
+      const inHighlightEmphasis = graphTeamHighlightLayer && inHighlightSubtree;
+
+      const stroke = isOutcomeFocus
+        ? COLORS.accent
+        : isSel
+          ? "#0f172a"
+          : inHighlightEmphasis
+            ? COLORS.accent
+            : dimOutsideSubtree
+              ? "rgba(148, 163, 184, 0.85)"
+              : hexStroke(col);
+      const fill = dimOutsideSubtree
+        ? !t.parentId
+          ? TEAM_DIM_ORG
+          : TEAM_DIM_LEAF
+        : inHighlightEmphasis
+          ? !t.parentId
+            ? "rgba(163, 113, 247, 0.78)"
+            : "rgba(63, 185, 80, 0.78)"
+          : teamShapeFill(col);
+      const teamStrokeW =
+        isOutcomeFocus ? 3 : isSel ? 2.5 : inHighlightEmphasis ? (expandedTeamId === t.id ? 3.1 : 2.5) : 2;
+      const teamStrokeDash = inHighlightEmphasis ? GRAPH.highlightDash : "none";
       const isHex = !t.parentId;
       const isDivision = isHex;
       const hasSubs = isDivision && divisionHasSubTeams(t.id);
@@ -508,8 +649,13 @@ export default function NetworkOfTeams() {
 
       const shapeClick = (e) => {
         e.stopPropagation();
-        setSelectedNode(t);
-        setExpandedTeamId((cur) => (cur === t.id ? null : t.id));
+        selectNodeFromGraph(t);
+        const turningOff = expandedTeamId === t.id;
+        setExpandedTeamId(turningOff ? null : t.id);
+        if (!turningOff) {
+          const divId = topDivisionIdForTeamNode(t);
+          if (divId) setExpandedOrgId(divId);
+        }
       };
 
       if (isHex) {
@@ -517,7 +663,9 @@ export default function NetworkOfTeams() {
           .attr("points", hexPoints(r))
           .attr("fill", fill)
           .attr("stroke", stroke)
-          .attr("stroke-width", isOutcomeFocus ? 3 : isSel ? 2.5 : 2)
+          .attr("stroke-width", teamStrokeW)
+          .attr("stroke-dasharray", teamStrokeDash)
+          .attr("stroke-opacity", inHighlightEmphasis ? 1 : dimOutsideSubtree ? 0.55 : 1)
           .style("cursor", hasSubs ? "pointer" : "pointer")
           .on("click", shapeClick);
       } else {
@@ -525,7 +673,9 @@ export default function NetworkOfTeams() {
           .attr("r", r)
           .attr("fill", fill)
           .attr("stroke", stroke)
-          .attr("stroke-width", isOutcomeFocus ? 3 : isSel ? 2.5 : 2)
+          .attr("stroke-width", teamStrokeW)
+          .attr("stroke-dasharray", teamStrokeDash)
+          .attr("stroke-opacity", inHighlightEmphasis ? 1 : dimOutsideSubtree ? 0.55 : 1)
           .style("cursor", "pointer")
           .on("click", shapeClick);
       }
@@ -538,7 +688,7 @@ export default function NetworkOfTeams() {
           .style("cursor", "pointer")
           .on("click", (e) => {
             e.stopPropagation();
-            setSelectedNode(t);
+            selectNodeFromGraph(t);
             setExpandedOrgId((cur) => (cur === t.id ? null : t.id));
           });
         tg.append("circle").attr("r", 11).attr("fill", COLORS.accent).attr("stroke", "#fff").attr("stroke-width", 1.5);
@@ -564,6 +714,7 @@ export default function NetworkOfTeams() {
         .attr("font-size", t.parentId ? 10 : 10.5)
         .attr("font-weight", 600)
         .attr("font-family", "Inter, system-ui, sans-serif")
+        .attr("opacity", dimOutsideSubtree ? 0.38 : 1)
         .style("pointer-events", "none")
         .text(short);
     });
@@ -584,18 +735,31 @@ export default function NetworkOfTeams() {
         const fill = getConfidenceAccent(o) || COLORS.challenge;
         const pct = outcomeProgressPct(o);
         const isSel = selectedNode?.id === o.id;
+        if (graphTeamHighlightLayer) {
+          g.append("circle")
+            .attr("r", outcomeR + 6)
+            .attr("fill", "none")
+            .attr("stroke", COLORS.accent)
+            .attr("stroke-width", 2.35)
+            .attr("stroke-dasharray", GRAPH.highlightDash)
+            .attr("stroke-opacity", 0.95)
+            .style("pointer-events", "none");
+        }
 
         g.append("circle")
           .attr("r", outcomeR)
           .attr("fill", fill)
-          .attr("stroke", isSel ? "#0f172a" : "#ffffff")
-          .attr("stroke-width", isSel ? 3.5 : 2.5)
+          .attr("stroke", graphTeamHighlightLayer ? COLORS.accent : isSel ? "#0f172a" : "#ffffff")
+          .attr("stroke-width", graphTeamHighlightLayer ? (isSel ? 3.2 : 2.85) : isSel ? 3.5 : 2.5)
+          .attr("stroke-dasharray", graphTeamHighlightLayer ? GRAPH.highlightDash : "none")
           .style("cursor", "pointer")
-          .style("filter", "drop-shadow(0 2px 6px rgba(15,23,42,0.12))")
+          .style("filter", graphTeamHighlightLayer ? "drop-shadow(0 2px 8px rgba(0,194,168,0.22))" : "drop-shadow(0 2px 6px rgba(15,23,42,0.12))")
           .on("click", (e) => {
             e.stopPropagation();
-            setSelectedNode(o);
-          });
+            selectNodeFromGraph(o);
+          })
+          .append("title")
+          .text(o.label);
 
         g.append("text")
           .attr("text-anchor", "middle")
@@ -608,17 +772,19 @@ export default function NetworkOfTeams() {
           .style("text-shadow", "0 1px 2px rgba(0,0,0,0.25)")
           .text(`${pct}%`);
 
-        const short = o.label.length > 42 ? `${o.label.slice(0, 40)}…` : o.label;
-        g.append("text")
-          .attr("class", "lod-fine")
-          .attr("text-anchor", "middle")
-          .attr("y", outcomeR + 18)
-          .attr("fill", GRAPH.outcomeLabelStrong)
-          .attr("font-size", 11)
-          .attr("font-weight", 600)
-          .attr("font-family", "Inter, system-ui, sans-serif")
-          .style("pointer-events", "none")
-          .text(short);
+        if (!hideOutcomeDetailTitles) {
+          const short = o.label.length > 42 ? `${o.label.slice(0, 40)}…` : o.label;
+          g.append("text")
+            .attr("class", "lod-fine")
+            .attr("text-anchor", "middle")
+            .attr("y", outcomeR + 18)
+            .attr("fill", GRAPH.outcomeLabelStrong)
+            .attr("font-size", 11)
+            .attr("font-weight", 600)
+            .attr("font-family", "Inter, system-ui, sans-serif")
+            .style("pointer-events", "none")
+            .text(short);
+        }
 
         const hasMeasures =
           filters.showMeasures && allLinks.some((l) => l.source === o.id && l.type === "measures");
@@ -656,6 +822,7 @@ export default function NetworkOfTeams() {
             .attr("data-node-drag", "true")
             .attr("transform", `translate(${pos.x},${pos.y})`)
             .style("cursor", "grab")
+            .style("opacity", graphTeamHighlightLayer ? 0.4 : 1)
             .call(bindBubbleDrag(m.id));
 
           g.append("circle")
@@ -666,7 +833,7 @@ export default function NetworkOfTeams() {
             .style("cursor", "pointer")
             .on("click", (e) => {
               e.stopPropagation();
-              setSelectedNode(m);
+              selectNodeFromGraph(m);
             });
 
           const short = m.label.length > 22 ? `${m.label.slice(0, 20)}…` : m.label;
@@ -684,7 +851,7 @@ export default function NetworkOfTeams() {
     }
 
     svg.on("click", () => {
-      setSelectedNode(null);
+      closeDetailPanel();
       setExpandedTeamId(null);
       setExpandedMeasures({});
     });
@@ -707,6 +874,8 @@ export default function NetworkOfTeams() {
     leftSidebarOpen,
     chartSize.w,
     chartSize.h,
+    selectNodeFromGraph,
+    closeDetailPanel,
   ]);
 
   const toggleConfidence = (key) => setFilters(f => ({ ...f, confidence: { ...f.confidence, [key]: !f.confidence[key] } }));
@@ -827,7 +996,7 @@ export default function NetworkOfTeams() {
         }}
       >
         {/* Header */}
-        <div style={{ padding: "18px 16px 14px", borderBottom: `1px solid ${PANEL.border}`, background: PANEL.bg }}>
+        <div style={{ padding: "18px 16px 14px", borderBottom: "1px solid rgba(148, 163, 184, 0.22)", background: PANEL.bg }}>
           <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
             <div
@@ -889,11 +1058,6 @@ export default function NetworkOfTeams() {
                   <option key={o.value} value={o.value}>{o.label}</option>
                 ))}
               </select>
-              {(filters.team || (filters.individual && INDIVIDUAL_TO_TEAM[filters.individual])) && (
-                <div style={{ marginTop: 8, padding: "6px 8px", background: COLORS.accent + "15", borderRadius: 4, fontSize: 9, color: COLORS.accent, border: `1px solid ${COLORS.accent}30` }}>
-                  Cross-team alignment links stay visible
-                </div>
-              )}
             </div>
 
             <div style={{ marginBottom: 16 }}>
@@ -901,33 +1065,77 @@ export default function NetworkOfTeams() {
                 <div style={{ fontSize: 9, color: PANEL.textMuted, textTransform: "uppercase", letterSpacing: "0.12em" }}>Confidence level</div>
                 <button type="button" onClick={() => setFilters(f => ({ ...f, confidence: { "on-track": true, challenge: true, "off-track": true, draft: true } }))} style={{ fontSize: 9, color: COLORS.accent, background: "none", border: "none", cursor: "pointer", padding: 0 }}>Clear</button>
               </div>
-              {confidenceLevels.map(c => (
-                <label key={c.key} style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: 6, userSelect: "none" }}>
-                  <div onClick={() => toggleConfidence(c.key)} style={{ width: 14, height: 14, borderRadius: 3, border: `2px solid ${c.color}`, background: filters.confidence[c.key] ? c.color : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, cursor: "pointer" }}>
-                    {filters.confidence[c.key] && <div style={{ width: 6, height: 6, background: "#ffffff", borderRadius: 1 }} />}
-                  </div>
-                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: c.color, flexShrink: 0 }} />
-                  <span style={{ fontSize: 11, color: PANEL.text, flex: 1, lineHeight: 1.35 }}>
-                    {c.label}
-                    {c.scoreRange != null && (
-                      <span style={{ color: PANEL.textMuted, fontWeight: 400 }}> ({c.scoreRange})</span>
-                    )}
-                  </span>
-                </label>
-              ))}
+              {confidenceLevels.map((c) => {
+                const on = filters.confidence[c.key];
+                const flip = () => toggleConfidence(c.key);
+                return (
+                  <label
+                    key={c.key}
+                    role="checkbox"
+                    aria-checked={on}
+                    tabIndex={0}
+                    onClick={flip}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        flip();
+                      }
+                    }}
+                    style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: 6, userSelect: "none", borderRadius: 4 }}
+                  >
+                    <div
+                      aria-hidden
+                      style={{
+                        width: 14,
+                        height: 14,
+                        borderRadius: 3,
+                        border: `2px solid ${c.color}`,
+                        background: on ? c.color : "transparent",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        flexShrink: 0,
+                        pointerEvents: "none",
+                      }}
+                    >
+                      {on && <div style={{ width: 6, height: 6, background: "#ffffff", borderRadius: 1 }} />}
+                    </div>
+                    <div style={{ width: 8, height: 8, borderRadius: "50%", background: c.color, flexShrink: 0, pointerEvents: "none" }} />
+                    <span style={{ fontSize: 11, color: PANEL.text, flex: 1, lineHeight: 1.35, pointerEvents: "none" }}>
+                      {c.label}
+                      {c.scoreRange != null && (
+                        <span style={{ color: PANEL.textMuted, fontWeight: 400 }}> ({c.scoreRange})</span>
+                      )}
+                    </span>
+                  </label>
+                );
+              })}
             </div>
 
             <div style={{ marginBottom: 4 }}>
-              <div style={{ fontSize: 9, color: PANEL.textMuted, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 8 }}>Time frame</div>
-              <select value={filters.timeFrame} onChange={e => setFilters(f => ({ ...f, timeFrame: e.target.value }))}
-                style={{ width: "100%", background: PANEL.inputBg, border: `1px solid ${PANEL.border}`, color: PANEL.text, padding: "7px 10px", borderRadius: 6, fontSize: 11, cursor: "pointer", outline: "none" }}>
-                {timeFrameOptions.map(o => <option key={o}>{o}</option>)}
+              <div
+                style={{ fontSize: 9, color: PANEL.textMuted, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 8 }}
+                title="Default shows all outcomes; other cycles filter by each outcome’s planning cycle (explicit timeFrame field or a stable demo value from the outcome id)."
+              >
+                Time frame
+              </div>
+              <select
+                value={filters.timeFrame}
+                title="Filter outcomes whose planning cycle matches this option. The first option is “no extra filter”."
+                onChange={(e) => setFilters((f) => ({ ...f, timeFrame: e.target.value }))}
+                style={{ width: "100%", background: PANEL.inputBg, border: `1px solid ${PANEL.border}`, color: PANEL.text, padding: "7px 10px", borderRadius: 6, fontSize: 11, cursor: "pointer", outline: "none" }}
+              >
+                {timeFrameOptions.map((o) => (
+                  <option key={o}>{o}</option>
+                ))}
               </select>
             </div>
           </div>
 
+          {/* One light divider after primary filters; collapsible blocks below use spacing only (less visual noise). */}
+          <div style={{ marginTop: 6, paddingTop: 14, borderTop: "1px solid rgba(148, 163, 184, 0.28)" }}>
           {/* Advanced filters (collapsed by default) */}
-          <div style={{ borderTop: `1px solid ${PANEL.border}`, paddingTop: 12, marginBottom: 12 }}>
+          <div style={{ marginBottom: 10 }}>
             <button
               type="button"
               onClick={() => setAdvancedFiltersOpen((o) => !o)}
@@ -954,20 +1162,39 @@ export default function NetworkOfTeams() {
               <div>
                 <div style={{ marginBottom: 16 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                    <div style={{ fontSize: 9, color: PANEL.textMuted, textTransform: "uppercase", letterSpacing: "0.12em" }}>Individual</div>
+                    <div
+                      style={{ fontSize: 9, color: PANEL.textMuted, textTransform: "uppercase", letterSpacing: "0.12em" }}
+                      title="Same effect as picking that person’s team in Primary filters — keeps outcomes owned by their mapped team (and sub-teams)."
+                    >
+                      Individual
+                    </div>
                     {filters.individual && <button type="button" onClick={() => setFilters(f => ({ ...f, individual: "" }))} style={{ fontSize: 9, color: COLORS.accent, background: "none", border: "none", cursor: "pointer", padding: 0 }}>Clear</button>}
                   </div>
-                  <select value={filters.individual} onChange={e => setFilters(f => ({ ...f, individual: e.target.value }))}
-                    style={{ width: "100%", background: PANEL.inputBg, border: `1px solid ${PANEL.border}`, color: filters.individual ? PANEL.text : PANEL.textMuted, padding: "7px 10px", borderRadius: 6, fontSize: 11, cursor: "pointer", outline: "none" }}>
+                  <select
+                    value={filters.individual}
+                    title="Keeps outcomes owned by this person’s mapped team (and its sub-teams)."
+                    onChange={(e) => setFilters((f) => ({ ...f, individual: e.target.value }))}
+                    style={{ width: "100%", background: PANEL.inputBg, border: `1px solid ${PANEL.border}`, color: filters.individual ? PANEL.text : PANEL.textMuted, padding: "7px 10px", borderRadius: 6, fontSize: 11, cursor: "pointer", outline: "none" }}
+                  >
                     <option value="">All individuals</option>
-                    {individuals.map(i => <option key={i}>{i}</option>)}
+                    {individuals.map((i) => (
+                      <option key={i} value={i}>
+                        {i}
+                      </option>
+                    ))}
                   </select>
                 </div>
 
                 <div style={{ marginBottom: 16 }}>
-                  <div style={{ fontSize: 9, color: PANEL.textMuted, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 8 }}>Collaborators</div>
+                  <div
+                    style={{ fontSize: 9, color: PANEL.textMuted, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 8 }}
+                    title="Outcomes whose collaborator list includes any selected name stay visible (OR). Hold Ctrl/Cmd to pick several."
+                  >
+                    Collaborators
+                  </div>
                   <select
                     multiple
+                    title="Match outcomes where collaborators includes any selected person."
                     size={Math.min(8, Math.max(3, COLLABORATOR_OPTIONS.length))}
                     value={filters.selectedCollaborators}
                     onChange={(e) => {
@@ -987,19 +1214,27 @@ export default function NetworkOfTeams() {
                       checked={filters.includeDeactivated}
                       onChange={(e) => setFilters((f) => ({ ...f, includeDeactivated: e.target.checked }))}
                     />
-                    <span style={{ fontSize: 10, color: PANEL.textMuted }}>Include deactivated users and archived teams</span>
+                    <span style={{ fontSize: 10, color: PANEL.textMuted }}>
+                      Include deactivated collaborators when matching the list above (e.g. archived users).
+                    </span>
                   </label>
                 </div>
 
                 <div style={{ marginBottom: 16 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                    <div style={{ fontSize: 9, color: PANEL.textMuted, textTransform: "uppercase", letterSpacing: "0.12em" }}>Labels</div>
+                    <div
+                      style={{ fontSize: 9, color: PANEL.textMuted, textTransform: "uppercase", letterSpacing: "0.12em" }}
+                      title="Outcomes that carry at least one of the selected tags (e.g. OKR, Growth) stay visible (OR)."
+                    >
+                      Labels
+                    </div>
                     {filters.selectedLabels.length > 0 && (
                       <button type="button" onClick={() => setFilters((f) => ({ ...f, selectedLabels: [] }))} style={{ fontSize: 9, color: COLORS.accent, background: "none", border: "none", cursor: "pointer", padding: 0 }}>Clear</button>
                     )}
                   </div>
                   <select
                     multiple
+                    title="Match outcomes whose labels array includes any selected tag."
                     size={Math.min(8, Math.max(3, ALL_LABELS.length))}
                     value={filters.selectedLabels}
                     onChange={(e) => {
@@ -1015,18 +1250,34 @@ export default function NetworkOfTeams() {
                   <div style={{ fontSize: 9, color: PANEL.textMuted, marginTop: 6 }}>Ctrl/Cmd+click to select several.</div>
                 </div>
 
-                <div style={{ marginBottom: 16 }}>
-                  <div style={{ fontSize: 9, color: PANEL.textMuted, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 8 }}>Changes since</div>
-                  <input
-                    type="date"
-                    value={filters.changesSince}
-                    onChange={(e) => setFilters((f) => ({ ...f, changesSince: e.target.value }))}
-                    style={{ width: "100%", boxSizing: "border-box", background: PANEL.inputBg, border: `1px solid ${PANEL.border}`, color: PANEL.text, padding: "7px 10px", borderRadius: 6, fontSize: 11, outline: "none" }}
-                  />
-                  {filters.changesSince && (
-                    <button type="button" onClick={() => setFilters((f) => ({ ...f, changesSince: "" }))} style={{ marginTop: 6, fontSize: 9, color: COLORS.accent, background: "none", border: "none", cursor: "pointer", padding: 0 }}>Clear date</button>
-                  )}
-                </div>
+                {SHOW_LAST_UPDATED_DATE_FILTER ? (
+                  <div style={{ marginBottom: 16 }}>
+                    <div
+                      style={{
+                        fontSize: 10,
+                        fontWeight: 600,
+                        color: PANEL.textMuted,
+                        letterSpacing: "0.04em",
+                        marginBottom: 6,
+                        lineHeight: 1.35,
+                      }}
+                    >
+                      Last updated on or after
+                    </div>
+                    <input
+                      type="date"
+                      value={filters.changesSince}
+                      onChange={(e) => setFilters((f) => ({ ...f, changesSince: e.target.value }))}
+                      style={{ width: "100%", boxSizing: "border-box", background: PANEL.inputBg, border: `1px solid ${PANEL.border}`, color: PANEL.text, padding: "7px 10px", borderRadius: 6, fontSize: 11, outline: "none" }}
+                    />
+                    <div style={{ fontSize: 9, color: PANEL.textMuted, marginTop: 6, lineHeight: 1.35 }}>
+                      Hides older outcomes and measures. Not a full change history.
+                    </div>
+                    {filters.changesSince ? (
+                      <button type="button" onClick={() => setFilters((f) => ({ ...f, changesSince: "" }))} style={{ marginTop: 6, fontSize: 9, color: COLORS.accent, background: "none", border: "none", cursor: "pointer", padding: 0 }}>Clear date</button>
+                    ) : null}
+                  </div>
+                ) : null}
 
                 {/* <div style={{ marginBottom: 4 }}>
                   <div style={{ fontSize: 9, color: PANEL.textMuted, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 8 }}>Level</div>
@@ -1044,7 +1295,7 @@ export default function NetworkOfTeams() {
           </div>
 
           {/* Layers (collapsed by default) */}
-          <div style={{ borderTop: `1px solid ${PANEL.border}`, paddingTop: 12 }}>
+          <div style={{ marginTop: 10 }}>
             <button
               type="button"
               onClick={() => setLayersOpen((o) => !o)}
@@ -1074,21 +1325,77 @@ export default function NetworkOfTeams() {
                 </p>
                 {[
                   { key: "showMeasures", label: "Measures", color: COLORS.measure },
-                  { key: "highlightMyTeam", label: "Highlight My Team", color: COLORS.teamHighlight },
-                ].map(l => (
-                  <label key={l.key} style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: 6, userSelect: "none" }}>
-                    <div onClick={() => setFilters(f => ({ ...f, [l.key]: !f[l.key] }))} style={{ width: 14, height: 14, borderRadius: 3, border: `2px solid ${l.color}`, background: filters[l.key] ? l.color : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, cursor: "pointer" }}>
-                      {filters[l.key] && <div style={{ width: 6, height: 6, background: "#ffffff", borderRadius: 1 }} />}
-                    </div>
-                    <span style={{ fontSize: 11, color: PANEL.text }}>{l.label}</span>
-                  </label>
-                ))}
+                  { key: "highlightMyTeam", label: "Highlight my team", color: COLORS.accent },
+                ].map((l) => {
+                  const on = filters[l.key];
+                  const flip = () => setFilters((f) => ({ ...f, [l.key]: !f[l.key] }));
+                  const isMyTeamRow = l.key === "highlightMyTeam";
+                  return (
+                    <label
+                      key={l.key}
+                      role="checkbox"
+                      aria-checked={on}
+                      tabIndex={0}
+                      onClick={flip}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          flip();
+                        }
+                      }}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        cursor: "pointer",
+                        marginBottom: 6,
+                        userSelect: "none",
+                        padding: "2px 0",
+                      }}
+                    >
+                      <div
+                        aria-hidden
+                        style={{
+                          width: 14,
+                          height: 14,
+                          borderRadius: 3,
+                          border: `2px solid ${l.color}`,
+                          background: on ? l.color : "transparent",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          flexShrink: 0,
+                          pointerEvents: "none",
+                        }}
+                      >
+                        {on && <div style={{ width: 6, height: 6, background: "#ffffff", borderRadius: 1 }} />}
+                      </div>
+                      <span
+                        style={{
+                          fontSize: 11,
+                          color: PANEL.text,
+                          fontWeight: 500,
+                          lineHeight: 1.35,
+                          pointerEvents: "none",
+                          flex: 1,
+                        }}
+                      >
+                        {l.label}
+                        {isMyTeamRow && !expandedTeamId ? (
+                          <span style={{ display: "block", fontSize: 9, color: PANEL.textMuted, fontWeight: 500, marginTop: 2 }}>
+                            Choose a team on the map first.
+                          </span>
+                        ) : null}
+                      </span>
+                    </label>
+                  );
+                })}
               </div>
             )}
           </div>
 
           {/* Legend — collapsible, compact; scroll inside when open so filters stay primary */}
-          <div style={{ borderTop: `1px solid ${PANEL.border}`, paddingTop: 12, marginTop: 4 }}>
+          <div style={{ marginTop: 10 }}>
             <button
               type="button"
               onClick={() => setLegendExpanded((o) => !o)}
@@ -1116,6 +1423,7 @@ export default function NetworkOfTeams() {
                 <GraphLegendPanel compact />
               </div>
             )}
+          </div>
           </div>
         </div>
       </div>
@@ -1178,8 +1486,8 @@ export default function NetworkOfTeams() {
                 type="search"
                 value={filters.keyword}
                 onChange={(e) => setFilters((f) => ({ ...f, keyword: e.target.value }))}
-                placeholder="Organization, team, or outcome…"
-                aria-label="Search graph"
+                placeholder="Teams, outcomes, measures…"
+                aria-label="Search teams, outcomes, and measures"
                 style={{
                   flex: 1,
                   minWidth: 0,
@@ -1309,6 +1617,12 @@ export default function NetworkOfTeams() {
               <>
                 {" · "}
                 Outcomes for <span style={{ color: GRAPH.text, fontWeight: 600 }}>{expandedTeamLabel}</span>
+                {expandedOrgId && expandedTeamId === expandedOrgId ? (
+                  <span style={{ color: GRAPH.textMuted, fontWeight: 500 }}>
+                    {" "}
+                    — outcome titles on hover / panel (less clutter on the map)
+                  </span>
+                ) : null}
               </>
             ) : (
               <>
@@ -1397,22 +1711,58 @@ export default function NetworkOfTeams() {
       {/* Right Detail Panel */}
       {selectedNode && (
         <div style={{ width: 280, flexShrink: 0, minHeight: 0, alignSelf: "stretch", background: PANEL.bg, borderLeft: `1px solid ${PANEL.border}`, padding: 20, overflow: "auto", boxShadow: "-2px 0 12px rgba(15,23,42,0.04)" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
-            <div>
-              <div style={{ fontSize: 9, color: PANEL.textMuted, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 4 }}>
-                {selectedNode.type === "team" ? (selectedNode.parentId ? "Sub-team" : "Organization") : selectedNode.type}
-              </div>
-              <div style={{ fontSize: 13, fontWeight: 700, color: PANEL.text, lineHeight: 1.4 }}>{selectedNode.label}</div>
-              {selectedNode.type === "team" && selectedNode.parentId && (
-                <div style={{ fontSize: 10, color: PANEL.textMuted, marginTop: 6 }}>
-                  Sub-team of {rawNodes.find((n) => n.id === selectedNode.parentId)?.label ?? selectedNode.parentId}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16, gap: 10 }}>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 10, flex: 1, minWidth: 0 }}>
+              {detailPanelStack.length > 0 ? (
+                <button
+                  type="button"
+                  onClick={detailPanelGoBack}
+                  aria-label="Back to previous item"
+                  title="Back"
+                  style={{
+                    flexShrink: 0,
+                    width: 34,
+                    height: 34,
+                    borderRadius: 8,
+                    border: `1px solid ${PANEL.border}`,
+                    background: PANEL.surface,
+                    color: PANEL.text,
+                    fontSize: 20,
+                    lineHeight: 1,
+                    cursor: "pointer",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    padding: 0,
+                    marginTop: 0,
+                  }}
+                >
+                  {"\u2039"}
+                </button>
+              ) : null}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 9, color: PANEL.textMuted, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 4 }}>
+                  {selectedNode.type === "team" ? (selectedNode.parentId ? "Sub-team" : "Organization") : selectedNode.type}
                 </div>
-              )}
-              {selectedNode.type === "team" && selectedNode.abbrev && !selectedNode.parentId && (
-                <div style={{ fontSize: 10, color: PANEL.textMuted, marginTop: 4 }}>Team list icon · {selectedNode.abbrev}</div>
-              )}
+                <div style={{ fontSize: 13, fontWeight: 700, color: PANEL.text, lineHeight: 1.4 }}>{selectedNode.label}</div>
+                {selectedNode.type === "team" && selectedNode.parentId && (
+                  <div style={{ fontSize: 10, color: PANEL.textMuted, marginTop: 6 }}>
+                    Sub-team of {rawNodes.find((n) => n.id === selectedNode.parentId)?.label ?? selectedNode.parentId}
+                  </div>
+                )}
+                {selectedNode.type === "team" && selectedNode.abbrev && !selectedNode.parentId && (
+                  <div style={{ fontSize: 10, color: PANEL.textMuted, marginTop: 4 }}>Team list icon · {selectedNode.abbrev}</div>
+                )}
+              </div>
             </div>
-            <button onClick={() => setSelectedNode(null)} style={{ background: "none", border: "none", color: PANEL.textMuted, fontSize: 16, cursor: "pointer", padding: 0, lineHeight: 1, marginLeft: 8 }}>×</button>
+            <button
+              type="button"
+              onClick={closeDetailPanel}
+              aria-label="Close panel"
+              style={{ background: "none", border: "none", color: PANEL.textMuted, fontSize: 16, cursor: "pointer", padding: 0, lineHeight: 1, flexShrink: 0 }}
+            >
+              ×
+            </button>
           </div>
 
           {selectedNode.type === "outcome" && (
@@ -1457,11 +1807,11 @@ export default function NetworkOfTeams() {
                         key={t.id}
                         role="button"
                         tabIndex={0}
-                        onClick={() => setSelectedNode(t)}
+                        onClick={() => drillDetailPanel(t)}
                         onKeyDown={(e) => {
                           if (e.key === "Enter" || e.key === " ") {
                             e.preventDefault();
-                            setSelectedNode(t);
+                            drillDetailPanel(t);
                           }
                         }}
                         style={{
@@ -1487,7 +1837,7 @@ export default function NetworkOfTeams() {
                             width: 6,
                             height: 6,
                             borderRadius: 0,
-                            background: getNodeColor(t, { highlightMyTeam: false }),
+                            background: getNodeColor(t),
                             flexShrink: 0,
                           }}
                         />
@@ -1566,10 +1916,10 @@ export default function NetworkOfTeams() {
               const other = rawNodes.find(n => n.id === otherId);
               if (!other) return null;
               return (
-                <div key={i} onClick={() => setSelectedNode(other)} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", borderRadius: 4, marginBottom: 4, cursor: "pointer", background: "transparent", transition: "background 0.15s" }}
+                <div key={i} onClick={() => drillDetailPanel(other)} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", borderRadius: 4, marginBottom: 4, cursor: "pointer", background: "transparent", transition: "background 0.15s" }}
                   onMouseEnter={e => e.currentTarget.style.background = PANEL.surface}
                   onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
-                  <div style={{ width: 6, height: 6, borderRadius: other.type === "team" ? 0 : "50%", background: getNodeColor(other, { highlightMyTeam: false }), flexShrink: 0 }} />
+                  <div style={{ width: 6, height: 6, borderRadius: other.type === "team" ? 0 : "50%", background: getNodeColor(other), flexShrink: 0 }} />
                   <span style={{ fontSize: 11, color: PANEL.text, flex: 1 }}>{other.label}</span>
                   <span style={{ fontSize: 9, color: PANEL.textMuted, background: PANEL.surface, padding: "1px 6px", borderRadius: 8 }}>{l.type}</span>
                 </div>

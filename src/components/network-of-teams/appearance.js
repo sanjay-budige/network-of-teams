@@ -10,10 +10,9 @@ export function getConfidenceAccent(node) {
   return COLORS.draft;
 }
 
-export function getNodeColor(node, opts = { highlightMyTeam: false }) {
+export function getNodeColor(node) {
   if (node.type === "strategic") return COLORS.strategic;
   if (node.type === "team") {
-    if (opts.highlightMyTeam) return node.myTeam ? COLORS.teamHighlight : (isOrgTeam(node) ? TEAM_DIM_ORG : TEAM_DIM_LEAF);
     return isOrgTeam(node) ? COLORS.organization : COLORS.team;
   }
   if (node.type === "outcome") return COLORS.outcome;

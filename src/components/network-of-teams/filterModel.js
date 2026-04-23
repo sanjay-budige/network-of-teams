@@ -1,8 +1,8 @@
 import {
   rawNodes,
-  rawLinks,
   INDIVIDUAL_TO_TEAM,
   DEACTIVATED_COLLABORATORS,
+  timeFrameOptions,
 } from "./data/graphData.js";
 import {
   parseSearchTokens,
@@ -20,6 +20,33 @@ export function collectDescendantTeamIds(rootId) {
       if (n.type === "team" && n.parentId && frontier.includes(n.parentId) && !ids.has(n.id)) {
         ids.add(n.id);
         next.push(n.id);
+      }
+    }
+    frontier = next;
+  }
+  return ids;
+}
+
+/** Ancestors of `teamId` up to the top-level division, plus every descendant of `teamId` — for graph focus styling. */
+export function collectTeamFocusHighlightIds(teamId) {
+  const allTeamNodes = rawNodes.filter((n) => n.type === "team");
+  const byId = new Map(allTeamNodes.map((t) => [t.id, t]));
+  const ids = new Set();
+  let id = teamId;
+  while (id) {
+    ids.add(id);
+    const n = byId.get(id);
+    id = n?.parentId ?? null;
+  }
+  let frontier = [...ids];
+  while (frontier.length) {
+    const next = [];
+    for (const tid of frontier) {
+      for (const t of allTeamNodes) {
+        if (t.parentId === tid && !ids.has(t.id)) {
+          ids.add(t.id);
+          next.push(t.id);
+        }
       }
     }
     frontier = next;
@@ -46,6 +73,14 @@ export function teamClosureForOutcomeIds(outcomeIds, allLinks, allNodes) {
     }
   }
   return teamIds;
+}
+
+/** Mock planning cycle for outcomes without an explicit `timeFrame` field (stable from id). */
+function planningCycleForMock(outcome) {
+  if (outcome.timeFrame) return outcome.timeFrame;
+  const digits = String(outcome.id ?? "").replace(/\D/g, "");
+  const n = digits ? parseInt(digits, 10) : 0;
+  return timeFrameOptions[n % timeFrameOptions.length];
 }
 
 /** Same filters as the graph for outcomes, optionally skipping confidence toggles (for sidebar counts). */
@@ -84,29 +119,22 @@ export function filterOutcomesForExplorer(outcomes, links, filters, { skipConfid
       return list.some((c) => want.has(c));
     });
   }
+  const defaultPlanningCycle = timeFrameOptions[0];
+  if (filters.timeFrame && filters.timeFrame !== defaultPlanningCycle) {
+    o = o.filter((x) => planningCycleForMock(x) === filters.timeFrame);
+  }
   const effectiveTeamLabel =
     filters.team || (filters.individual && INDIVIDUAL_TO_TEAM[filters.individual]) || "";
   if (effectiveTeamLabel) {
     const teamNode = rawNodes.find((n) => n.type === "team" && n.label === effectiveTeamLabel);
     if (teamNode) {
       const teamIds = collectDescendantTeamIds(teamNode.id);
-      const directLinks = links.filter((l) => teamIds.has(l.source) || teamIds.has(l.target));
-      const connectedIds = new Set(teamIds);
-      directLinks.forEach((l) => {
-        connectedIds.add(l.source);
-        connectedIds.add(l.target);
+      /** Owner scope only — do not expand through aligned links (those stay in the detail panel). */
+      o = o.filter((x) => {
+        const own = links.find((l) => l.type === "owns" && l.target === x.id);
+        const ownerId = own?.source ?? x.owner;
+        return ownerId && teamIds.has(ownerId);
       });
-      const alignedOutcomeIds = directLinks
-        .filter((l) => l.type === "aligned" || l.type === "owns")
-        .map((l) => (l.source === teamNode.id ? l.target : l.source));
-      const alignedTeamLinks = links.filter(
-        (l) => alignedOutcomeIds.includes(l.source) || alignedOutcomeIds.includes(l.target),
-      );
-      alignedTeamLinks.forEach((l) => {
-        connectedIds.add(l.source);
-        connectedIds.add(l.target);
-      });
-      o = o.filter((x) => connectedIds.has(x.id));
     }
   }
   // if (!filters.level.team) {

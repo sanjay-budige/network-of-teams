@@ -28,7 +28,14 @@ export const GRAPH = {
   outcomeLabel: "#1e293b",
   outcomeLabelStrong: "#0f172a",
   link: "#94a3b8",
+  /** Hub + team hierarchy (one visual family on the map). */
+  hierarchyLink: "rgba(100, 116, 139, 0.52)",
+  /** Team→outcome and outcome→measure (second family; calmer than separate blues/greys). */
+  workLink: "rgba(71, 85, 105, 0.62)",
   linkDash: "5 5",
+  hierarchyDash: "6 4",
+  /** Dashed stroke for “Highlight my team” emphasis (selected team subtree + outcomes). */
+  highlightDash: "7 5",
   measureStroke: "#64748b",
   measureFill: "#ffffff",
 };
@@ -50,3 +57,6 @@ export const TEAM_DIM_ORG = "rgba(163, 113, 247, 0.38)";
 export const TEAM_DIM_LEAF = "rgba(63, 185, 80, 0.38)";
 
 export const NODE_DRAG_MAX_PX = 200;
+
+/** When false, “Last updated on or after” is hidden and ignored (logic stays for a later release). */
+export const SHOW_LAST_UPDATED_DATE_FILTER = false;

@@ -10,7 +10,7 @@ const TEAM_SPECS = [
   { id: "cs-field", label: "CS Field & Regions", abbrev: "CS", parentId: "cs" },
   { id: "cs-reg", label: "CS Regulatory Science", abbrev: "CS", parentId: "cs" },
   { id: "ef", label: "Enabling Function - EF", abbrev: "EF", parentId: null },
-  { id: "ef-finance", label: "EF Corporate Finance", abbrev: "EF", parentId: "ef", myTeam: true },
+  { id: "ef-finance", label: "EF Corporate Finance", abbrev: "EF", parentId: "ef" },
   { id: "ef-it", label: "EF IT & Digital", abbrev: "EF", parentId: "ef" },
   { id: "ef-hr", label: "EF People & Talent", abbrev: "EF", parentId: "ef" },
   { id: "ef-legal", label: "EF Legal & Compliance", abbrev: "EF", parentId: "ef" },
@@ -26,7 +26,6 @@ const teamNodesFromSpec = TEAM_SPECS.map((t) => ({
   group: "team",
   parentId: t.parentId ?? null,
   abbrev: t.abbrev,
-  myTeam: !!t.myTeam,
 }));
 
 const teamHierarchyLinks = TEAM_SPECS.filter((t) => t.parentId).map((t) => ({

@@ -31,8 +31,10 @@ export function curvedChordPath(x1, y1, r1, x2, y2, r2, hubCx, hubCy, minDim, bu
 }
 
 export function layoutTeamNodes(teamNodes, cx, cy, minDim, expandedOrgId) {
-  const R1 = minDim * 0.48;
-  const R2 = minDim * 0.84;
+  /** Division ring — slightly farther from hub for clearer org → division hierarchy. */
+  const R1 = minDim * 0.545;
+  /** Leaf ring base — pushed out so sub-teams sit clearly beyond their division hex. */
+  const R2 = minDim * 0.925;
   const hubR = Math.max(68, minDim * 0.086);
   const divR = 32;
   const leafR = 22;  
@@ -58,7 +60,7 @@ export function layoutTeamNodes(teamNodes, cx, cy, minDim, expandedOrgId) {
     const kids = teamNodes.filter((t) => t.parentId === root.id);
     const n = kids.length;
     const R2_BASE = R2;
-    const LEAF_RING_STEP = minDim * 0.066 + 30;
+    const LEAF_RING_STEP = minDim * 0.076 + 38;
     const MAX_LEAF_PER_RING = 9;
 
     kids.forEach((child, j) => {
@@ -108,6 +110,19 @@ export function linkEndpointTeamId(teamId, positions, nodeById) {
   return resolveLayoutAnchorTeamId(teamId, positions, nodeById);
 }
 
+/** Furthest distance from hub (cx,cy) to the outer edge of any positioned child team of this division. */
+function maxChildHullRadiusFromHub(divisionId, positions, cx, cy) {
+  let max = 0;
+  for (const s of TEAM_SPECS) {
+    if (s.parentId !== divisionId) continue;
+    const p = positions[s.id];
+    if (!p) continue;
+    const d = Math.hypot(p.x - cx, p.y - cy) + p.r;
+    max = Math.max(max, d);
+  }
+  return max;
+}
+
 export function layoutOutcomesAroundTeams({
   outcomes,
   positions,
@@ -118,6 +133,7 @@ export function layoutOutcomesAroundTeams({
   outcomeR,
   nodeById,
   focusTeamId,
+  expandedOrgId,
   minDim,
 }) {
   const ownsByOutcome = new Map();
@@ -127,7 +143,14 @@ export function layoutOutcomesAroundTeams({
   const rowStep = outcomeR * 2 + Math.max(92, minDim * 0.108);
   const lateralPack = Math.max(outcomeR * 5.2, minDim * 0.104);
 
-  if (focusTeamId && positions[focusTeamId]) {
+  /** When the focused division is expanded, leaf teams sit on an outer ring; packing every outcome on the division hex overlaps them — use per-owner anchors instead. */
+  const focusSplitByOwner =
+    focusTeamId &&
+    expandedOrgId === focusTeamId &&
+    divisionHasSubTeams(focusTeamId) &&
+    TEAM_SPECS.some((s) => s.parentId === focusTeamId && positions[s.id]);
+
+  if (focusTeamId && positions[focusTeamId] && !focusSplitByOwner) {
     const pt = positions[focusTeamId];
     const outs = [...outcomes].sort((a, b) => a.id.localeCompare(b.id));
     const radialGap = Math.max(minDim * 0.155, 188);
@@ -171,7 +194,23 @@ export function layoutOutcomesAroundTeams({
 
   const radialGap = gap;
   const lateral = lateralPack;
-  const maxPerRowAnchor = Math.max(2, Math.min(4, Math.floor(minDim / 128)));
+  const maxPerRowAnchor = focusSplitByOwner
+    ? 1
+    : Math.max(2, Math.min(4, Math.floor(minDim / 128)));
+  const rowStepFocus = rowStep * (focusSplitByOwner ? 1.72 : 1);
+
+  /** Stagger each sub-tree along its spoke so row-0 outcomes from different owners do not land in the same annulus (major source of overlap). */
+  const anchorStagger = new Map();
+  if (focusSplitByOwner && expandedOrgId && positions[expandedOrgId]) {
+    const anchors = [...byAnchor.keys()].filter((id) => id !== ORG_ROOT_ID && positions[id]);
+    anchors.sort((a, b) => {
+      const pa = positions[a];
+      const pb = positions[b];
+      return Math.atan2(pa.y - cy, pa.x - cx) - Math.atan2(pb.y - cy, pb.x - cx);
+    });
+    const step = outcomeR * 2.85 + Math.max(40, minDim * 0.034);
+    anchors.forEach((id, i) => anchorStagger.set(id, i * step));
+  }
 
   for (const [anchorId, outs] of byAnchor) {
     const pt = positions[anchorId];
@@ -205,11 +244,30 @@ export function layoutOutcomesAroundTeams({
     const px = -uy;
     const py = ux;
 
+    let radialGapForAnchor = radialGap;
+    if (focusSplitByOwner && expandedOrgId) {
+      const an = nodeById.get(anchorId);
+      if (an?.parentId === expandedOrgId) {
+        radialGapForAnchor = radialGap + Math.max(72, minDim * 0.055);
+      }
+    }
+
+    const childHull =
+      expandedOrgId === anchorId ? maxChildHullRadiusFromHub(anchorId, positions, cx, cy) : 0;
+
+    const stagger = anchorStagger.get(anchorId) ?? 0;
+    const rowStride = focusSplitByOwner ? rowStepFocus : rowStep;
+
     outs.forEach((o, j) => {
       const row = Math.floor(j / maxPerRowAnchor);
       const idxInRow = j % maxPerRowAnchor;
       const rowCount = Math.min(maxPerRowAnchor, outs.length - row * maxPerRowAnchor);
-      const radialBase = pt.r + radialGap + outcomeR + row * rowStep;
+      let radialBase = stagger + pt.r + radialGapForAnchor + outcomeR + row * rowStride;
+      if (childHull > 0) {
+        const clearance = Math.max(96, minDim * 0.082);
+        const minHubDist = stagger + childHull + clearance + outcomeR + row * rowStride;
+        radialBase = Math.max(radialBase, minHubDist - dist);
+      }
       const off = rowCount === 1 ? 0 : (idxInRow - (rowCount - 1) / 2) * lateral;
       positions[o.id] = {
         x: pt.x + ux * radialBase + px * off,

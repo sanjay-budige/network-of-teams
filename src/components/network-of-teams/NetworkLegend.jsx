@@ -45,7 +45,7 @@ export function GraphLegendPanel({ compact = false }) {
     display: "flex",
     alignItems: "flex-start",
     gap: compact ? 8 : 10,
-    marginBottom: compact ? 8 : 10,
+    marginBottom: compact ? 6 : 10,
   };
   const section = {
     fontSize: compact ? 8 : 9,
@@ -72,10 +72,10 @@ export function GraphLegendPanel({ compact = false }) {
   return (
     <div
       role="img"
-      aria-label="Map legend: organization hub, teams as hex or circle, outcomes by confidence color, measures, and dashed lines for structure and ownership."
+      aria-label="Map legend: organization hub, teams as hex or circle, outcomes by confidence color, measures, and dashed connection lines on the map."
       style={{
         borderRadius: compact ? 8 : 10,
-        border: `1px solid ${PANEL.border}`,
+        border: compact ? `1px solid rgba(226, 232, 240, 0.72)` : `1px solid ${PANEL.border}`,
         background: compact ? PANEL.surface : PANEL.bg,
         padding: pad,
         boxSizing: "border-box",
@@ -124,31 +124,25 @@ export function GraphLegendPanel({ compact = false }) {
         </div>
       </div>
 
-      <div style={{ ...section, marginTop: compact ? 10 : 14, marginBottom: compact ? 6 : 8 }}>Lines</div>
-
-      <div style={{ ...row, marginBottom: compact ? 8 : 10 }}>
-        <div style={{ width: compact ? 40 : 44, flexShrink: 0 }}>
-          <svg width="40" height="24" viewBox="0 0 40 24" aria-hidden>
-            <line x1="2" y1="7" x2="38" y2="7" stroke="#cbd5e1" strokeWidth="1.35" strokeDasharray="4 3" strokeLinecap="round" />
-            <line x1="2" y1="17" x2="38" y2="17" stroke={COLORS.organization} strokeWidth="1.55" strokeLinecap="round" />
-          </svg>
-        </div>
-        <div>
-          <div style={{ fontSize: fs, color: PANEL.text, lineHeight: 1.35, fontWeight: 600 }}>Structure</div>
-          <div style={sub}>Pale dashed → hub · Solid purple → team hierarchy</div>
-        </div>
-      </div>
+      <div style={{ ...section, marginTop: compact ? 8 : 14, marginBottom: compact ? 5 : 8 }}>Lines</div>
 
       <div style={{ ...row, marginBottom: 0 }}>
-        <div style={{ width: compact ? 40 : 44, flexShrink: 0 }}>
-          <svg width="40" height="24" viewBox="0 0 40 24" aria-hidden>
-            <line x1="2" y1="7" x2="38" y2="7" stroke={COLORS.outcome} strokeWidth="1.15" strokeDasharray="4 3" strokeLinecap="round" />
-            <line x1="2" y1="17" x2="38" y2="17" stroke={GRAPH.link} strokeWidth="1.25" strokeDasharray="5 5" strokeLinecap="round" />
+        <div style={{ width: compact ? 36 : 40, flexShrink: 0 }}>
+          <svg width="40" height="8" viewBox="0 0 40 8" aria-hidden>
+            <line
+              x1="2"
+              y1="4"
+              x2="38"
+              y2="4"
+              stroke={GRAPH.link}
+              strokeWidth="1.35"
+              strokeDasharray={GRAPH.linkDash}
+              strokeLinecap="round"
+            />
           </svg>
         </div>
-        <div>
-          <div style={{ fontSize: fs, color: PANEL.text, lineHeight: 1.35, fontWeight: 600 }}>Work</div>
-          <div style={sub}>Blue dashed = team owns outcome · Grey dashed = outcome → measure</div>
+        <div style={{ fontSize: fs, color: PANEL.textMuted, lineHeight: 1.45, fontWeight: 500 }}>
+          Dashed lines connect the hub, teams, outcomes, and measures.
         </div>
       </div>
     </div>

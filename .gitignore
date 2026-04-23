@@ -8,6 +8,10 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+
+# Netlify CLI local link state (regenerated on your machine; do not commit)
+.netlify
+
 dist
 dist-ssr
 *.local
